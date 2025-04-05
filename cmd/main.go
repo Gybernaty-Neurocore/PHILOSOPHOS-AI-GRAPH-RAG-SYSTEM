@@ -17,25 +17,19 @@ func main() {
 		log.Println("Successfully loaded .env file")
 	}
 
-	geminiAPIKey := os.Getenv("GEMINI_API_KEY")
-	if geminiAPIKey == "" {
-		log.Fatal("GEMINI_API_KEY is not set. Please set it in .env file or environment variables.")
-	} else {
-		log.Println("GEMINI_API_KEY is set")
+	if os.Getenv("HF_TOKEN") == "" {
+		log.Fatal("HF_TOKEN is not set")
 	}
-
 	if err := services.InitDB(); err != nil {
-		log.Fatal("Failed to initialize database:", err)
+		log.Fatal("Failed to init DB:", err)
 	}
 	defer services.CloseConnection()
 
 	r := gin.Default()
-	r.POST("/upload", handlers.UploadDocumentGin)
+	r.POST("/upload", handlers.UploadDocument)
 	r.POST("/add", handlers.AddDocuments)
 	r.POST("/query", handlers.Query)
 
-	log.Println("Starting server on :8080")
-	if err := r.Run(":8080"); err != nil {
-		log.Fatal("Failed to run server:", err)
-	}
+	log.Println("Server started on :8080")
+	_ = r.Run(":8080")
 }
