@@ -1,8 +1,13 @@
 package services
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
 	"strings"
 )
 
@@ -48,6 +53,47 @@ func QueryGraphRAG(query string) (string, error) {
 }
 
 func GenerateResponse(query, context string) (string, error) {
-	// Для упрощения пока просто вернем context
-	return fmt.Sprintf("Контекст:\n%s\n\nВопрос: %s", context, query), nil
+	hfToken := os.Getenv("HF_TOKEN")
+	if hfToken == "" {
+		return "", fmt.Errorf("HF_TOKEN not set")
+	}
+
+	payload := map[string]interface{}{
+		"inputs": map[string]string{
+			"prompt": fmt.Sprintf("Вот контекст:\n%s\n\nОтветь на вопрос: %s", context, query),
+		},
+	}
+
+	body, _ := json.Marshal(payload)
+
+	req, _ := http.NewRequest("POST", "https://api-inference.huggingface.co/models/Qwen/Qwen1.5-Chat", bytes.NewBuffer(body))
+	req.Header.Set("Authorization", "Bearer "+hfToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("HF generation failed with status %s: %s", resp.Status, string(b))
+	}
+
+	var result []struct {
+		GeneratedText string `json:"generated_text"`
+	}
+
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse response: %v", err)
+	}
+
+	if len(result) > 0 {
+		return result[0].GeneratedText, nil
+	}
+
+	return "", fmt.Errorf("empty response from LLM")
 }
