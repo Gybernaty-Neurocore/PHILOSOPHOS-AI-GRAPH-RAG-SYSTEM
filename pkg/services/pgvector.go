@@ -10,21 +10,38 @@ import (
 
 var pgConn *pgx.Conn
 
-// InitDB устанавливает соединение с PostgreSQL и создаёт таблицы для узлов и связей
 func InitDB() error {
 	connStr := fmt.Sprintf("postgres://postgres:%s@localhost:5438/postgres?sslmode=disable", os.Getenv("PG_PASSWORD"))
 	var err error
 	pgConn, err = pgx.Connect(context.Background(), connStr)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to connect to database: %v", err)
 	}
-	_, _ = pgConn.Exec(context.Background(), `CREATE EXTENSION IF NOT EXISTS vector`)
-	_, _ = pgConn.Exec(context.Background(), `CREATE TABLE IF NOT EXISTS nodes (id SERIAL PRIMARY KEY, content TEXT, embedding VECTOR(768))`)
-	_, _ = pgConn.Exec(context.Background(), `CREATE TABLE IF NOT EXISTS edges (id SERIAL PRIMARY KEY, from_node INT, to_node INT, relation TEXT)`)
+
+	_, err = pgConn.Exec(context.Background(), `
+        CREATE EXTENSION IF NOT EXISTS vector;
+        CREATE TABLE IF NOT EXISTS nodes (
+            id SERIAL PRIMARY KEY,
+            content TEXT,
+            embedding VECTOR(768)
+        );
+        CREATE TABLE IF NOT EXISTS edges (
+            id SERIAL PRIMARY KEY,
+            source_id INT REFERENCES nodes(id),
+            target_id INT REFERENCES nodes(id),
+            weight FLOAT
+        );
+    `)
+	if err != nil {
+		return fmt.Errorf("failed to create tables: %v", err)
+	}
+
+	fmt.Println("Database initialized successfully")
 	return nil
 }
 
-// CloseConnection закрывает соединение с базой данных
 func CloseConnection() {
-	_ = pgConn.Close(context.Background())
+	if pgConn != nil {
+		pgConn.Close(context.Background())
+	}
 }

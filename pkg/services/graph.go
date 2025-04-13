@@ -1,99 +1,116 @@
 package services
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
+	"math"
 	"strings"
 )
 
 func AddGraphDocument(content string) error {
+	fmt.Printf("Adding document with content: %q\n", content)
 	embedding, err := GetEmbedding(content)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get embedding: %v", err)
 	}
-	var id int
-	err = pgConn.QueryRow(context.Background(), `INSERT INTO nodes (content, embedding) VALUES ($1, $2) RETURNING id`, content, embedding).Scan(&id)
+
+	var nodeID int
+	err = pgConn.QueryRow(context.Background(), `
+        INSERT INTO nodes (content, embedding) VALUES ($1, $2) RETURNING id
+    `, content, fmt.Sprintf("[%s]", joinFloats(embedding))).Scan(&nodeID)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to insert node: %v", err)
 	}
-	rows, _ := pgConn.Query(context.Background(), `SELECT id FROM nodes WHERE id != $1 LIMIT 1`, id)
-	for rows.Next() {
-		var otherID int
-		_ = rows.Scan(&otherID)
-		_, _ = pgConn.Exec(context.Background(), `INSERT INTO edges (from_node, to_node, relation) VALUES ($1, $2, $3)`, id, otherID, "related")
-	}
+	fmt.Printf("Node inserted successfully, nodeID: %d\n", nodeID)
+
+	fmt.Printf("Document added successfully, nodeID: %d\n", nodeID)
 	return nil
 }
 
 func QueryGraphRAG(query string) (string, error) {
+	fmt.Printf("Starting QueryGraphRAG with query: %q\n", query)
 	embedding, err := GetEmbedding(query)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to get embedding: %v", err)
 	}
-	var content string
-	var nodeID int
-	err = pgConn.QueryRow(context.Background(), `SELECT id, content FROM nodes ORDER BY embedding <-> $1 LIMIT 1`, embedding).Scan(&nodeID, &content)
+
+	rows, err := pgConn.Query(context.Background(), `
+        SELECT content, embedding FROM nodes
+    `)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to query nodes: %v", err)
 	}
-	rows, _ := pgConn.Query(context.Background(), `SELECT content FROM nodes WHERE id IN (SELECT to_node FROM edges WHERE from_node = $1)`, nodeID)
-	var neighborContents []string
+	defer rows.Close()
+
+	var bestContent string
+	maxSimilarity := -1.0
+
 	for rows.Next() {
-		var n string
-		_ = rows.Scan(&n)
-		neighborContents = append(neighborContents, n)
+		var content, embeddingStr string
+		if err := rows.Scan(&content, &embeddingStr); err != nil {
+			return "", fmt.Errorf("failed to scan node: %v", err)
+		}
+
+		nodeEmbedding, err := parseEmbedding(embeddingStr)
+		if err != nil {
+			return "", fmt.Errorf("failed to parse embedding: %v", err)
+		}
+
+		similarity := cosineSimilarity(embedding, nodeEmbedding)
+		fmt.Printf("Similarity for content %q: %f\n", content, similarity)
+		if similarity > maxSimilarity {
+			maxSimilarity = similarity
+			bestContent = content
+		}
 	}
-	contextText := content + "\n" + strings.Join(neighborContents, "\n")
-	return GenerateResponse(query, contextText)
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("error iterating nodes: %v", err)
+	}
+
+	if bestContent == "" {
+		return "", fmt.Errorf("no relevant content found")
+	}
+
+	fmt.Printf("Query result: %q\n", bestContent)
+	return bestContent, nil
 }
 
-func GenerateResponse(query, context string) (string, error) {
-	hfToken := os.Getenv("HF_TOKEN")
-	if hfToken == "" {
-		return "", fmt.Errorf("HF_TOKEN not set")
+func joinFloats(floats []float32) string {
+	parts := make([]string, len(floats))
+	for i, f := range floats {
+		parts[i] = fmt.Sprintf("%f", f)
 	}
+	return strings.Join(parts, ",")
+}
 
-	payload := map[string]interface{}{
-		"inputs": map[string]string{
-			"prompt": fmt.Sprintf("Вот контекст:\n%s\n\nОтветь на вопрос: %s", context, query),
-		},
+func parseEmbedding(s string) ([]float32, error) {
+	s = strings.Trim(s, "[]")
+	parts := strings.Split(s, ",")
+	result := make([]float32, len(parts))
+	for i, p := range parts {
+		var f float64
+		if _, err := fmt.Sscanf(p, "%f", &f); err != nil {
+			return nil, fmt.Errorf("failed to parse float at index %d: %v", i, err)
+		}
+		result[i] = float32(f)
 	}
+	return result, nil
+}
 
-	body, _ := json.Marshal(payload)
-
-	req, _ := http.NewRequest("POST", "https://api-inference.huggingface.co/models/Qwen/Qwen1.5-Chat", bytes.NewBuffer(body))
-	req.Header.Set("Authorization", "Bearer "+hfToken)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to send request: %v", err)
+func cosineSimilarity(a, b []float32) float64 {
+	if len(a) != len(b) {
+		return 0
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("HF generation failed with status %s: %s", resp.Status, string(b))
+	var dotProduct, normA, normB float64
+	for i := range a {
+		dotProduct += float64(a[i]) * float64(b[i])
+		normA += float64(a[i]) * float64(a[i])
+		normB += float64(b[i]) * float64(b[i])
 	}
-
-	var result []struct {
-		GeneratedText string `json:"generated_text"`
+	normA = math.Sqrt(normA)
+	normB = math.Sqrt(normB)
+	if normA == 0 || normB == 0 {
+		return 0
 	}
-
-	err = json.NewDecoder(resp.Body).Decode(&result)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse response: %v", err)
-	}
-
-	if len(result) > 0 {
-		return result[0].GeneratedText, nil
-	}
-
-	return "", fmt.Errorf("empty response from LLM")
+	return dotProduct / (normA * normB)
 }

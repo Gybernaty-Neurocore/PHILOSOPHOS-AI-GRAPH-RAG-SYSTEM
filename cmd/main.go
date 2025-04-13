@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 
@@ -17,19 +18,24 @@ func main() {
 		log.Println("Successfully loaded .env file")
 	}
 
-	if os.Getenv("HF_TOKEN") == "" {
-		log.Fatal("HF_TOKEN is not set")
+	if os.Getenv("PG_PASSWORD") == "" {
+		log.Fatal("PG_PASSWORD is not set")
 	}
+
 	if err := services.InitDB(); err != nil {
 		log.Fatal("Failed to init DB:", err)
 	}
 	defer services.CloseConnection()
 
+	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
+	r.SetTrustedProxies([]string{"127.0.0.1"})
 	r.POST("/upload", handlers.UploadDocument)
 	r.POST("/add", handlers.AddDocuments)
 	r.POST("/query", handlers.Query)
 
-	log.Println("Server started on :8080")
-	_ = r.Run(":8080")
+	fmt.Println("Server starting on :8080")
+	if err := r.Run(":8080"); err != nil {
+		log.Fatal("Failed to start server:", err)
+	}
 }

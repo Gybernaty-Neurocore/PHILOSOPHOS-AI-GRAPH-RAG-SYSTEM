@@ -1,48 +1,48 @@
 package services
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
+	"os/exec"
 )
 
 func GetEmbedding(text string) ([]float32, error) {
-	hfToken := os.Getenv("HF_TOKEN")
-	if hfToken == "" {
-		return nil, fmt.Errorf("HF_TOKEN not set")
+	fmt.Printf("Calling GetEmbedding for text: %q\n", text)
+
+	if _, err := os.Stat("embed.py"); os.IsNotExist(err) {
+		return nil, fmt.Errorf("embed.py not found in current directory")
 	}
 
-	payload := map[string]interface{}{
-		"inputs": text,
-	}
-	body, _ := json.Marshal(payload)
-
-	req, _ := http.NewRequest("POST", "https://api-inference.huggingface.co/models/Qwen/Qwen1.5-Chat", bytes.NewBuffer(body))
-	req.Header.Set("Authorization", "Bearer "+hfToken)
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	cmd := exec.Command("python", "embed.py", text)
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %v", err)
+		return nil, fmt.Errorf("failed to create stdout pipe: %v", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("Qwen embedding request failed with status %s: %s", resp.Status, string(b))
-	}
-
-	var result struct {
-		Embedding []float32 `json:"embedding"`
-	}
-	err = json.NewDecoder(resp.Body).Decode(&result)
+	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse response: %v", err)
+		return nil, fmt.Errorf("failed to create stderr pipe: %v", err)
 	}
 
-	return result.Embedding, nil
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start Python script: %v", err)
+	}
+
+	stdoutBytes, _ := io.ReadAll(stdout)
+	stderrBytes, _ := io.ReadAll(stderr)
+
+	if err := cmd.Wait(); err != nil {
+		fmt.Printf("Python script failed: %v, stderr: %s\n", err, string(stderrBytes))
+		return nil, fmt.Errorf("failed to run Python script: %v, stderr: %s", err, string(stderrBytes))
+	}
+
+	var result []float32
+	if err := json.Unmarshal(stdoutBytes, &result); err != nil {
+		fmt.Printf("Error parsing Python output: %v, stdout: %s\n", err, string(stdoutBytes))
+		return nil, fmt.Errorf("failed to parse Python output: %v", err)
+	}
+
+	fmt.Printf("Embedding retrieved successfully, length: %d\n", len(result))
+	return result, nil
 }
